@@ -12,6 +12,11 @@
  *         c. Enfiler le fils gauche s'il existe
  *         d. Enfiler le fils droit  s'il existe
  *
+ *  Fonctionnalites ajoutees :
+ *    - Mesure du temps exact d'execution (en us et ns via std::chrono)
+ *    - Suivi de la taille (size) et de la capacite (capacity) des conteneurs
+ *    - Suivi du pic de taille de la file (consommation memoire max)
+ *
  *  Complexite : O(n) temps,  O(n) espace (file au pire = 1 niveau)
  * ============================================================
  */
@@ -21,6 +26,8 @@
 #include <vector>
 #include <string>
 #include <iomanip>
+#include <chrono>
+#include <algorithm>
 
 // ─────────────────────────────────────────────────────────────
 //  Structure d'un noeud
@@ -113,28 +120,53 @@ void libererArbre(Noeud* racine) {
 
 // ─────────────────────────────────────────────────────────────
 /**
- * @brief Parcourt l'arbre en largeur (BFS - Breadth First Search).
- *
- * Utilise une file (std::queue) pour visiter les noeuds niveau par niveau :
- *   1. Enfiler la racine.
- *   2. Tant que la file n'est pas vide :
- *        - Defiler le noeud courant.
- *        - Stocker sa valeur dans le niveau courant.
- *        - Enfiler ses enfants gauche et droit s'ils existent.
+ * @brief Structure contenant les resultats et metriques du parcours BFS :
+ *        - Les niveaux et l'ordre de visite.
+ *        - La taille (size) et la capacite (capacity) des conteneurs.
+ *        - Le temps d'execution exact (std::chrono haute resolution).
+ */
+struct ResultatBFS {
+    std::vector<std::vector<int>> niveaux;         // Valeurs groupees par niveau
+    std::vector<int>              ordre_plat;      // Ordre complet de visite (a plat)
+    double                        duree_us = 0.0;  // Temps d'execution en microsecondes (us)
+    long long                     duree_ns = 0;    // Temps d'execution en nanosecondes (ns)
+    std::size_t                   taille_max_file = 0; // Pic de taille atteint par la file std::queue
+    std::size_t                   total_noeuds = 0;    // Nombre total de noeuds visites (size)
+};
+
+// ─────────────────────────────────────────────────────────────
+/**
+ * @brief Parcourt l'arbre en largeur (BFS) et mesure en temps reel :
+ *        - Le temps d'execution exact (haute precision).
+ *        - La taille (size) et capacite (capacity) des vecteurs.
+ *        - Le pic d'occupation memoire de la file (taille max).
  *
  * @param racine  Pointeur vers la racine de l'arbre (nullptr = arbre vide).
- * @return        Vecteur de vecteurs : chaque sous-vecteur contient les valeurs
- *                d'un niveau de l'arbre, de la racine vers les feuilles.
+ * @return        Structure ResultatBFS complete.
  * @complexity    Temps O(n), Espace O(n).
  */
-std::vector<std::vector<int>> bfs(Noeud* racine) {
-    std::vector<std::vector<int>> niveaux;
-    if (!racine) return niveaux;
+ResultatBFS bfs(Noeud* racine) {
+    // ── Debut de la mesure chronometrique haute resolution ───
+    auto t_debut = std::chrono::high_resolution_clock::now();
+
+    ResultatBFS res;
+    if (!racine) {
+        auto t_fin = std::chrono::high_resolution_clock::now();
+        res.duree_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t_fin - t_debut).count();
+        res.duree_us = std::chrono::duration<double, std::micro>(t_fin - t_debut).count();
+        return res;
+    }
 
     std::queue<Noeud*> file;
     file.push(racine);
+    res.taille_max_file = file.size();
 
     while (!file.empty()) {
+        // Maintien du pic de la taille de la file
+        if (file.size() > res.taille_max_file) {
+            res.taille_max_file = file.size();
+        }
+
         // Nombre de noeuds sur CE niveau = taille actuelle de la file
         int taille_niveau = static_cast<int>(file.size());
         std::vector<int> niveau_courant;
@@ -144,14 +176,27 @@ std::vector<std::vector<int>> bfs(Noeud* racine) {
             file.pop();
 
             niveau_courant.push_back(noeud->valeur);
+            res.ordre_plat.push_back(noeud->valeur);
 
-            // Enfiler les enfants pour le prochain niveau
+            // Enfiler les enfants pour le niveau suivant
             if (noeud->gauche) file.push(noeud->gauche);
             if (noeud->droit)  file.push(noeud->droit);
         }
-        niveaux.push_back(niveau_courant);
+
+        if (file.size() > res.taille_max_file) {
+            res.taille_max_file = file.size();
+        }
+
+        res.niveaux.push_back(niveau_courant);
+        res.total_noeuds += static_cast<std::size_t>(taille_niveau);
     }
-    return niveaux;
+
+    // ── Fin de la mesure chronometrique ───────────────────────
+    auto t_fin = std::chrono::high_resolution_clock::now();
+    res.duree_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t_fin - t_debut).count();
+    res.duree_us = std::chrono::duration<double, std::micro>(t_fin - t_debut).count();
+
+    return res;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -159,7 +204,6 @@ std::vector<std::vector<int>> bfs(Noeud* racine) {
  * @brief Affiche une representation ASCII de l'arbre dans la console.
  *
  * Chaque niveau est centre proportionnellement a la largeur totale de l'arbre.
- * Necessite le resultat de bfs() en entree.
  *
  * @param niveaux  Resultat de bfs() : vecteur de niveaux.
  */
@@ -172,7 +216,7 @@ void afficherArbreVisuel(const std::vector<std::vector<int>>& niveaux) {
     std::cout << "\n  Representation visuelle :\n\n";
     for (std::size_t lvl = 0; lvl < profondeur; ++lvl) {
         std::size_t nb     = niveaux[lvl].size();
-        std::size_t espace = largeur_max / nb;
+        std::size_t espace = (nb > 0) ? (largeur_max / nb) : largeur_max;
         std::string ligne;
         for (int val : niveaux[lvl]) {
             std::string sv     = std::to_string(val);
@@ -189,105 +233,118 @@ void afficherArbreVisuel(const std::vector<std::vector<int>>& niveaux) {
 
 // ─────────────────────────────────────────────────────────────
 /**
- * @brief Affiche le resultat du BFS de facon formatee dans la console.
+ * @brief Affiche le detail complet du BFS :
+ *        - Les noeuds niveau par niveau
+ *        - La taille (size) et la capacite (capacity) de chaque conteneur
+ *        - Le pic memoire de la file (std::queue)
+ *        - Le temps exact d'execution
  *
- * Affiche les noeuds niveau par niveau ainsi que l'ordre de visite
- * complet sous forme "v1 -> v2 -> ... -> vn".
- *
- * @param titre    Titre de l'exemple affiche dans l'encadre.
- * @param niveaux  Resultat de bfs() : vecteur de niveaux.
+ * @param titre  Titre ou description du test.
+ * @param res    Structure ResultatBFS issue de l'execution du parcours.
  */
-void afficherBFS(const std::string& titre,
-                 const std::vector<std::vector<int>>& niveaux) {
-    std::cout << "==========================================================================\n";
-    std::cout << "   " << titre << "\n";
-    std::cout << "   PARCOURS EN LARGEUR (BFS) - Resultat niveau par niveau\n";
-    std::cout << "==========================================================================\n";
+// ─────────────────────────────────────────────────────────────
+/**
+ * @brief Affiche de maniere concise et claire les resultats du BFS :
+ *        - L'ordre de visite (plat et par niveau)
+ *        - La taille (size) et la capacite (capacity)
+ *        - Le temps d'execution exact
+ *
+ * @param titre  Titre ou description du test.
+ * @param res    Structure ResultatBFS issue du parcours.
+ */
+void afficherBFS(const std::string& titre, const ResultatBFS& res) {
+    std::cout << "----------------------------------------------------------------------\n";
+    std::cout << titre << "\n";
+    std::cout << "----------------------------------------------------------------------\n";
 
-    if (niveaux.empty()) {
-        std::cout << "  Arbre vide.\n";
-        std::cout << "==========================================================================\n\n";
+    if (res.niveaux.empty()) {
+        std::cout << "  Arbre vide\n";
+        std::cout << "  Temps exact       : " << std::fixed << std::setprecision(3)
+                  << res.duree_us << " us (" << res.duree_ns << " ns)\n\n";
         return;
     }
 
-    int total = 0;
-    for (std::size_t lvl = 0; lvl < niveaux.size(); ++lvl) {
-        std::cout << "  Niveau " << std::setw(2) << lvl << "  :  [ ";
-        for (int val : niveaux[lvl]) {
-            std::cout << std::setw(3) << val << " ";
-            ++total;
-        }
-        std::cout << "]\n";
-    }
-
-    std::cout << "--------------------------------------------------------------------------\n";
-    std::cout << "  Ordre plat  :  ";
-    bool first = true;
-    for (auto& niveau : niveaux) {
-        for (int val : niveau) {
-            if (!first) std::cout << " -> ";
-            std::cout << val;
-            first = false;
-        }
+    // 1. Ordre de parcours BFS
+    std::cout << "  Ordre BFS         : ";
+    for (std::size_t i = 0; i < res.ordre_plat.size(); ++i) {
+        if (i > 0) std::cout << " -> ";
+        std::cout << res.ordre_plat[i];
     }
     std::cout << "\n";
-    std::cout << "  Noeuds visites : " << total << "\n";
-    std::cout << "==========================================================================\n\n";
+
+    // 2. Organisation par niveau
+    std::cout << "  Par niveau        : ";
+    for (std::size_t lvl = 0; lvl < res.niveaux.size(); ++lvl) {
+        if (lvl > 0) std::cout << " | ";
+        std::cout << "N" << lvl << " [";
+        for (std::size_t i = 0; i < res.niveaux[lvl].size(); ++i) {
+            if (i > 0) std::cout << ", ";
+            std::cout << res.niveaux[lvl][i];
+        }
+        std::cout << "]";
+    }
+    std::cout << "\n";
+
+    // 3. Taille (size) et capacite (capacity) essentielles
+    std::cout << "  Taille (size)     : " << res.ordre_plat.size() << " noeuds\n";
+    std::cout << "  Capacite (vector) : " << res.ordre_plat.capacity()
+              << " | File (queue max): " << res.taille_max_file << "\n";
+
+    // 4. Temps exact d'execution
+    std::cout << "  Temps exact       : " << std::fixed << std::setprecision(3)
+              << res.duree_us << " us (" << res.duree_ns << " ns)\n\n";
+}
+
+/** Surcharge acceptant directement la liste des niveaux pour compatibilite. */
+void afficherBFS(const std::string& titre, const std::vector<std::vector<int>>& niveaux) {
+    ResultatBFS res;
+    res.niveaux = niveaux;
+    for (const auto& niv : niveaux) {
+        for (int val : niv) res.ordre_plat.push_back(val);
+        res.total_noeuds += niv.size();
+    }
+    afficherBFS(titre, res);
 }
 
 // ─────────────────────────────────────────────────────────────
 //  Main
 // ─────────────────────────────────────────────────────────────
 int main() {
-    std::cout << "\n";
-    std::cout << "==========================================================================\n";
-    std::cout << "        DEMO BFS (Parcours en Largeur) sur Arbre Binaire\n";
-    std::cout << "==========================================================================\n\n";
+    std::cout << "\n======================================================================\n";
+    std::cout << "         PARCOURS BFS D'UN ARBRE BINAIRE (METRIQUES & TEMPS)\n";
+    std::cout << "======================================================================\n\n";
 
-    // ── Exemple 1 : arbre complet a 3 niveaux ─────────────────
-    //
-    //          1
-    //        /   ╲
-    //       2     3
-    //      / ╲   / ╲
-    //     4   5 6   7
-    //
+    // ── Exemple 1 : arbre complet (7 noeuds) ───────────────────
     {
-        std::cout << "[Exemple 1]  Arbre complet  {1, 2, 3, 4, 5, 6, 7}\n";
         Noeud* arbre = construireArbre({1, 2, 3, 4, 5, 6, 7});
-        auto   niv   = bfs(arbre);
-        afficherArbreVisuel(niv);
-        afficherBFS("Exemple 1", niv);
+        auto res = bfs(arbre);
+        afficherBFS("[Exemple 1] Arbre complet {1, 2, 3, 4, 5, 6, 7}", res);
         libererArbre(arbre);
     }
 
-    // ── Exemple 2 : arbre desequilibre ────────────────────────
-    //
-    //          10
-    //         /  ╲
-    //        5    20
-    //       / ╲     ╲
-    //      3   7     30
-    //     /
-    //    1
-    //
+    // ── Exemple 2 : arbre desequilibre (6 noeuds) ─────────────
     {
-        std::cout << "[Exemple 2]  Arbre desequilibre  {10, 5, 20, 3, 7, -1, 30, 1}\n";
         Noeud* arbre = construireArbre({10, 5, 20, 3, 7, -1, 30, 1});
-        auto   niv   = bfs(arbre);
-        afficherArbreVisuel(niv);
-        afficherBFS("Exemple 2", niv);
+        auto res = bfs(arbre);
+        afficherBFS("[Exemple 2] Arbre desequilibre {10, 5, 20, 3, 7, -1, 30, 1}", res);
         libererArbre(arbre);
     }
 
     // ── Exemple 3 : arbre vide ─────────────────────────────────
     {
-        std::cout << "[Exemple 3]  Arbre vide\n";
         Noeud* arbre = nullptr;
-        auto   niv   = bfs(arbre);
-        afficherBFS("Exemple 3", niv);
+        auto res = bfs(arbre);
+        afficherBFS("[Exemple 3] Arbre vide", res);
     }
 
-    std::cout << "Fin du programme.\n\n";
+    // ── Exemple 4 : arbre parfait (15 noeuds) ──────────────────
+    {
+        std::vector<int> vals = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+        Noeud* arbre = construireArbre(vals);
+        auto res = bfs(arbre);
+        afficherBFS("[Exemple 4] Arbre parfait {1..15}", res);
+        libererArbre(arbre);
+    }
+
     return 0;
 }
